@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111a5c'/%3E%3Cpath d='M16 5c3 0 4 2 3 4l-1 4c4 2 5 6 4 10l2 4H8l2-4c-1-4 0-8 4-10l-1-4c-1-2 0-4 3-4z' fill='%23f4f2ec'/%3E%3C/svg%3E">
+<title>Clase Azul Reposado 3D</title>
+<style>
+  :root { --fg:#e8ecf5; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#080b13; font-family:system-ui,-apple-system,Segoe UI,sans-serif; }
+  #bg { position:fixed; inset:0; background:radial-gradient(ellipse 70% 80% at 50% 42%, #33405f 0%, #161c2e 52%, #07090f 100%); }
+  canvas#c { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  #note { position:fixed; top:36px; left:0; right:0; text-align:center; color:rgba(232,236,245,.32); font-size:10px; letter-spacing:.08em; }
+  @media (max-width:600px) { button { padding:8px 10px; font-size:12px; } #ui { gap:6px; bottom:12px; } }
+  #ui { position:fixed; left:16px; right:16px; bottom:16px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  button { background:rgba(255,255,255,.08); color:var(--fg); border:1px solid rgba(255,255,255,.18); padding:9px 14px;
+           border-radius:10px; cursor:pointer; font-size:13px; backdrop-filter:blur(6px); }
+  button:hover { background:rgba(255,255,255,.16); }
+  #load { position:fixed; inset:0; display:grid; place-items:center; color:#cfd6e6; font-size:13px; letter-spacing:.18em; }
+  #title { position:fixed; top:18px; left:0; right:0; text-align:center; color:rgba(232,236,245,.55); font-size:12px; letter-spacing:.32em; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<div id="bg"></div>
+<canvas id="c"></canvas>
+<div id="title">Clase Azul · Reposado · 750 ml</div>
+<div id="note">Фан-3D-модель · не связана с Clase Azul</div>
+<div id="load">ГЕНЕРАЦИЯ 4K-ТЕКСТУР…</div>
+<div id="ui">
+  <button id="rot">⏸ Пауза</button>
+  <button id="front">Спереди</button>
+  <button id="back">Сзади</button>
+  <button id="lbl">Этикетка: вкл</button>
+  <button id="shot">📷 Снимок 3840×2160</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const D = Math.PI / 180, TAU = Math.PI * 2;
+const MOBILE = matchMedia('(pointer: coarse)').matches || Math.min(innerWidth, innerHeight) < 700;
+// All bottle dimensions are in units of total height H (stopper top ≈ 1.0).
+// Profile measured from reference photos: [height Y, radius r].
+const PROFILE = [
+  [0.006, 0.000], [0.004, 0.070], [0.000, 0.126], [0.003, 0.141], [0.009, 0.1465], [0.020, 0.1485],
+  [0.036, 0.1478], [0.085, 0.1400], [0.146, 0.1300], [0.207, 0.1190], [0.267, 0.1060], [0.298, 0.0970],
+  [0.318, 0.0880], [0.331, 0.0800], [0.339, 0.0745], [0.3445, 0.0718], [0.350, 0.0745], [0.359, 0.0830],
+  [0.371, 0.0900], [0.389, 0.0970], [0.413, 0.1030], [0.450, 0.1075], [0.486, 0.1065], [0.515, 0.1035],
+  [0.571, 0.0940], [0.632, 0.0800], [0.693, 0.0650], [0.723, 0.0580], [0.745, 0.0545], [0.765, 0.0530],
+  [0.796, 0.0570], [0.822, 0.0630], [0.844, 0.0710], [0.862, 0.0790], [0.875, 0.0870], [0.884, 0.0950],
+  [0.890, 0.1000], [0.896, 0.1012], [0.901, 0.0990], [0.9045, 0.0940], [0.9058, 0.0860], [0.9058, 0.0720]
+];
+const LIP_TOP = 0.9058;
+
+// ---------- sample profile by arc length ----------
+const curve = new THREE.CatmullRomCurve3(PROFILE.map(([y, r]) => new THREE.Vector3(r, y, 0)), false, 'centripetal');
+const NV = 1000;
+const L = curve.getLength();
+const SP = curve.getSpacedPoints(NV);
+const S = SP.map((p, i) => {
+  const a = SP[Math.max(0, i - 1)], b = SP[Math.min(NV, i + 1)];
+  const dr = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dr, dy) || 1;
+  return { r: Math.max(0, p.x), y: p.y, s: (i / NV) * L, nr: dy / len, ny: -dr / len };
+});
+// monotonic body range (outer foot .. lip top) for Y lookups
+let iFoot = S.findIndex(p => p.r > 0.147);
+let iTop = S.length - 1; while (S[iTop].y < LIP_TOP - 0.0015) iTop--;
+function lookup(Y) {
+  let lo = iFoot, hi = iTop;
+  if (Y <= S[lo].y) return { i: lo, f: 0 };
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (S[m].y < Y) lo = m; else hi = m; }
+  const f = (Y - S[lo].y) / ((S[hi].y - S[lo].y) || 1);
+  return { i: lo, f: Math.min(1, Math.max(0, f)) };
+}
+const sOfY = Y => { const { i, f } = lookup(Y); return S[i].s + (S[Math.min(NV, i + 1)].s - S[i].s) * f; };
+const rOfY = Y => { const { i, f } = lookup(Y); return S[i].r + (S[Math.min(NV, i + 1)].r - S[i].r) * f; };
+const nOfY = Y => { const { i } = lookup(Y); return S[i]; };
+
+// texture seam sits at θ = 130° (blank band between back label and side sprig)
+const TH0 = 130 * D;
+const uOf = th => ((((th - TH0) % TAU) + TAU) % TAU) / TAU;
+const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------- design constants (from photos) ----------
+const OVAL = { Y: 0.515, a: 0.043, b: 0.072, depth: 0.0075 };
+const CROWN_LEAVES = [];
+for (let k = 0; k < 8; k++) CROWN_LEAVES.push({ c: (22.5 + 45 * k) * D, base: 0.79, tip: 0.836, hw: 12 * D, amp: 0.0022, small: true });
+for (let k = 0; k < 8; k++) CROWN_LEAVES.push({ c: (45 * k) * D, base: 0.79, tip: 0.888, hw: 22.5 * D, amp: 0.0045, small: false });
+function leafHW(Lf, Y) {
+  const t = (Y - Lf.base) / (Lf.tip - Lf.base);
+  if (t >= 1) return 0;
+  if (t <= 0) return Lf.hw;
+  return Lf.hw * Math.pow(1 - Math.pow(t, 1.5), 0.95);
+}
+const dripY = th => {
+  const ph = (((th / TAU) * 18) % 1 + 1) % 1, tri = 1 - Math.abs(2 * ph - 1);
+  return 0.7515 - 0.0085 * Math.pow(tri, 2.4);
+};
+
+// ---------- seeded random ----------
+let seed = 20261018;
+const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const jit = a => (rnd() - 0.5) * 2 * a;
+
+// ================= 4K PAINTED TEXTURE =================
+const TW = 4096, THt = 4096;
+const cv = document.createElement('canvas'); cv.width = TW; cv.height = THt;
+const g = cv.getContext('2d');
+
+const cobalt = () => { const k = rnd(); return `rgb(${(9 + k * 10) | 0},${(14 + k * 13) | 0},${(62 + k * 28) | 0})`; };
+
+// place a motif at (θ, Y): local frame in H units, x → +θ (right), y → up
+function at(th, Y, fn) {
+  const s = sOfY(Y), r = Math.max(0.03, rOfY(Y));
+  const px = uOf(th) * TW, py = (1 - s / L) * THt, kx = TW / (TAU * r), ky = THt / L;
+  const sd = seed;
+  for (const off of [-TW, 0, TW]) {
+    const x = px + off; if (x < -500 || x > TW + 500) continue;
+    seed = sd; g.setTransform(kx, 0, 0, -ky, x, py); fn();
+  }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function leafPath(Lh, W, b) {
+  // plump teardrop: pointed at the stem, broad rounded end, slight hand-painted bend
+  g.beginPath(); g.moveTo(0, 0);
+  g.bezierCurveTo(Lh * 0.14, W * 0.28 + b * 0.2, Lh * 0.34, W * 0.52 + b * 0.6, Lh * 0.62, W * 0.52 + b);
+  g.bezierCurveTo(Lh * 0.9, W * 0.52 + b, Lh * 1.02, W * 0.26 + b, Lh * 1.0, b * 0.9);
+  g.bezierCurveTo(Lh * 0.99, -W * 0.28 + b, Lh * 0.88, -W * 0.5 + b, Lh * 0.6, -W * 0.48 + b);
+  g.bezierCurveTo(Lh * 0.34, -W * 0.46 + b * 0.6, Lh * 0.14, -W * 0.24 + b * 0.2, 0, 0);
+  g.closePath();
+}
+function brushFill(pathFn, Lh, W, along = true) {
+  pathFn(); g.fillStyle = cobalt(); g.fill();
+  g.save(); pathFn(); g.clip();
+  const n = 2 + ((rnd() * 4) | 0);
+  g.lineCap = 'round';
+  for (let k = 0; k < n; k++) {
+    g.strokeStyle = `rgba(${(55 + rnd() * 40) | 0},${(70 + rnd() * 40) | 0},${(150 + rnd() * 40) | 0},${0.06 + rnd() * 0.14})`;
+    g.lineWidth = W * (0.07 + rnd() * 0.16);
+    g.beginPath();
+    if (along) { const y0 = jit(W * 0.3); g.moveTo(Lh * 0.2, y0); g.quadraticCurveTo(Lh * 0.55, y0 + jit(W * 0.35), Lh * 0.95, jit(W * 0.3)); }
+    else { const x0 = jit(W * 0.3); g.moveTo(x0, Lh * 0.05); g.quadraticCurveTo(x0 + jit(W * 0.3), Lh * 0.5, jit(W * 0.25), Lh * 0.95); }
+    g.stroke();
+  }
+  pathFn(); g.strokeStyle = 'rgba(8,12,52,0.42)'; g.lineWidth = W * 0.13; g.stroke();
+  g.restore();
+}
+function paintLeaf(Lh, W, b = 0) { brushFill(() => leafPath(Lh, W, b), Lh, W); }
+function dot(rad) { g.beginPath(); g.arc(0, 0, rad, 0, TAU); g.fillStyle = cobalt(); g.fill(); g.strokeStyle = 'rgba(8,12,52,.45)'; g.lineWidth = rad * 0.35; g.stroke(); }
+
+// garland: leaves along a smooth path given by anchors [θdeg, Y]
+function garland(anchors, o) {
+  const cr = new THREE.CatmullRomCurve3(anchors.map(([t, y]) => new THREE.Vector3(t * D * 0.1, y, 0)), false, 'centripetal');
+  const pts = cr.getPoints(1200).map(p => ({ th: p.x / 0.1, Y: p.y }));
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], r = rOfY((a.Y + b.Y) / 2);
+    a.dx = r * (b.th - a.th); a.ds = sOfY(b.Y) - sOfY(a.Y);
+    cum.push(cum[i - 1] + Math.hypot(a.dx, a.ds));
+  }
+  pts[pts.length - 1].dx = pts[pts.length - 2].dx; pts[pts.length - 1].ds = pts[pts.length - 2].ds;
+  const total = cum[cum.length - 1];
+  const find = d => { let i = 0; while (i < cum.length - 2 && cum[i + 1] < d) i++; return pts[i]; };
+  let side = o.firstSide || 1;
+  for (let d = o.start || 0.004; d < total - o.step * 0.4; d += o.step / 2) {
+    const p = find(d), ang = Math.atan2(p.ds, p.dx);
+    const la = ang + side * (o.spread * D + jit(7 * D));
+    const Lh = o.len * (0.88 + rnd() * 0.24), W = o.wid * (0.9 + rnd() * 0.2), bend = side * jit(o.wid * 0.15) - side * o.wid * 0.08;
+    at(p.th, p.Y, () => { g.rotate(la); g.translate(0.0014, 0); paintLeaf(Lh, W, bend); });
+    side = -side;
+  }
+  if (o.tip) { const p = pts[pts.length - 1], ang = Math.atan2(p.ds, p.dx);
+    at(p.th, p.Y, () => { g.rotate(ang + jit(5 * D)); paintLeaf(o.len * 0.95, o.wid); }); }
+}
+const mirror = arr => arr.map(([t, y]) => [-t, y]);
+
+function paintTexture() {
+  // glazed ceramic base: warm white with faint glaze mottling
+  g.fillStyle = '#f4f2ec'; g.fillRect(0, 0, TW, THt);
+  for (let k = 0; k < 2600; k++) {
+    const x = rnd() * TW, y = rnd() * THt, rr = 6 + rnd() * 40, w = rnd() < 0.5;
+    g.fillStyle = w ? 'rgba(255,255,255,0.05)' : 'rgba(205,200,188,0.045)';
+    g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
+  }
+
+  // ---- upper body front: laurel wreath around the oval ----
+  const wreath = [[2, 0.386], [16, 0.389], [32, 0.402], [46, 0.43], [54, 0.47], [56, 0.52], [54, 0.57],
+                  [50, 0.615], [44, 0.655], [35, 0.685], [23, 0.703], [13, 0.703], [8, 0.692]];
+  const wOpt = { len: 0.036, wid: 0.0185, step: 0.024, spread: 38, tip: false, start: 0.006 };
+  garland(wreath, wOpt);
+  garland(mirror(wreath), { ...wOpt, firstSide: -1 });
+
+  // ---- back: 8-petal flower ----
+  at(Math.PI, 0.55, () => {
+    for (let k = 0; k < 8; k++) {
+      const a = k * 45 * D + 22.5 * D;
+      g.save(); g.rotate(a); g.translate(0.0065, 0); paintLeaf(0.027, 0.0145); g.restore();
+      g.save(); g.rotate(a + 22.5 * D); g.translate(0.033, 0); dot(0.0042); g.restore();
+    }
+    g.beginPath(); g.arc(0, 0, 0.0042, 0, TAU); g.strokeStyle = cobalt(); g.lineWidth = 0.0022; g.stroke();
+  });
+
+  // ---- lower cone: fan + dot + two S-scrolls ----
+  at(0, 0.258, () => {
+    for (const a of [90, 63, 117, 37, 143, 12, 168]) {
+      const k = Math.abs(a - 90) / 78;
+      g.save(); g.rotate(a * D); g.translate(0.003, 0); paintLeaf(0.03 - k * 0.008, 0.0145 - k * 0.003); g.restore();
+    }
+  });
+  at(0, 0.239, () => dot(0.0048));
+  const scroll = [[-12, 0.272], [-27, 0.287], [-46, 0.284], [-60, 0.262], [-62, 0.232], [-52, 0.204],
+                  [-36, 0.19], [-24, 0.172], [-18, 0.146], [-25, 0.118], [-42, 0.102], [-60, 0.104]];
+  const sOpt = { len: 0.029, wid: 0.0148, step: 0.019, spread: 42, tip: true, start: 0.004 };
+  garland(scroll, sOpt);
+  garland(mirror(scroll), { ...sOpt, firstSide: -1 });
+
+  // ---- side sprigs on the lower cone ----
+  for (const sg of [1, -1]) {
+    garland([[sg * 78, 0.19], [sg * 86, 0.188], [sg * 94, 0.192]], { len: 0.027, wid: 0.0135, step: 0.022, spread: 45, tip: true, start: 0.003 });
+    at(sg * 101, 0.172, () => dot(0.0038));
+  }
+
+  // ---- bottom band: 8 agaves alternating with dots ----
+  for (let k = 0; k < 8; k++) {
+    const th = k * 45 * D;
+    at(th, 0.03, () => paintAgave(0.04));
+    at(th + 22.5 * D, 0.05, () => dot(0.0046));
+  }
+
+  paintCrown();
+}
+
+function paintAgave(h) {
+  const sp = [[0, 1.0, 0.27], [0.42, 0.78, 0.23], [-0.42, 0.78, 0.23], [0.72, 0.4, 0.17], [-0.72, 0.4, 0.17]];
+  const col = cobalt();
+  const path = () => {
+    g.beginPath();
+    for (const [tx, ty, bw] of sp) {
+      const x = tx * h, y = ty * h, b = bw * h;
+      g.moveTo(-b + x * 0.12, 0.05 * h);
+      g.quadraticCurveTo(x * 0.3 - b * 0.4, y * 0.6, x, y);
+      g.quadraticCurveTo(x * 0.3 + b * 0.6, y * 0.45, b + x * 0.12, 0.05 * h);
+      g.closePath();
+    }
+    g.ellipse(0, 0.07 * h, 0.27 * h, 0.1 * h, 0, 0, TAU);
+  };
+  path(); g.fillStyle = col; g.fill('nonzero');
+  g.save(); path(); g.clip();
+  for (let k = 0; k < 4; k++) { g.strokeStyle = `rgba(70,88,170,${0.1 + rnd() * 0.16})`; g.lineWidth = h * 0.05; g.beginPath(); g.moveTo(jit(h * 0.3), 0); g.lineTo(jit(h * 0.5), h * 0.8); g.stroke(); }
+  g.restore();
+}
+
+function paintCrown() {
+  const P = (th, Y) => [uOf(th) * TW, (1 - sOfY(Y) / L) * THt];
+  // solid band with drip edge at the bottom
+  g.beginPath();
+  const N = 1800;
+  for (let k = 0; k <= N; k++) { const th = TH0 + (k / N) * TAU; const y = P(th, dripY(th) + jit(0.0005))[1], x = (k / N) * TW; k ? g.lineTo(x, y) : g.moveTo(x, y); }
+  g.lineTo(TW, (1 - sOfY(0.80) / L) * THt); g.lineTo(0, (1 - sOfY(0.80) / L) * THt); g.closePath();
+  g.fillStyle = '#111a5c'; g.fill();
+  // mottled streaks in the band
+  g.save(); g.clip();
+  for (let k = 0; k < 900; k++) {
+    const x = rnd() * TW, y0 = (1 - sOfY(0.80) / L) * THt, y1 = (1 - sOfY(0.745) / L) * THt;
+    g.strokeStyle = rnd() < 0.5 ? `rgba(65,82,165,${0.06 + rnd() * 0.12})` : `rgba(5,8,40,${0.08 + rnd() * 0.15})`;
+    g.lineWidth = 3 + rnd() * 14; g.beginPath(); g.moveTo(x, y0 + jit(20)); g.lineTo(x + jit(25), y1); g.stroke();
+  }
+  g.restore();
+  // leaves: small (inner) first, then big
+  for (const Lf of CROWN_LEAVES) {
+    const left = [], right = [];
+    for (let k = 0; k <= 60; k++) {
+      const Y = 0.752 + (Lf.tip - 0.752) * (k / 60), hw = leafHW(Lf, Y);
+      left.push(P(Lf.c - hw, Y)); right.push(P(Lf.c + hw, Y));
+    }
+    const ctr = P(Lf.c, Lf.base);
+    for (const off of [-TW, 0, TW]) {
+      if (ctr[0] + off < -900 || ctr[0] + off > TW + 900) continue;
+      const fixU = ([x, y]) => [x - ctr[0] > TW / 2 ? x - TW : (ctr[0] - x > TW / 2 ? x + TW : x), y];
+      const poly = [...left.map(fixU), ...right.map(fixU).reverse()];
+      const path = () => { g.beginPath(); poly.forEach(([x, y], i) => i ? g.lineTo(x + off, y) : g.moveTo(x + off, y)); g.closePath(); };
+      path(); g.fillStyle = Lf.small ? '#0d1550' : '#111a5c'; g.fill();
+      g.save(); path(); g.clip();
+      const top = P(Lf.c, Lf.tip), base = P(Lf.c, Lf.base);
+      for (let k = 0; k < 14; k++) {
+        g.strokeStyle = rnd() < 0.6 ? `rgba(70,88,170,${0.08 + rnd() * 0.16})` : `rgba(5,8,40,${0.1 + rnd() * 0.18})`;
+        g.lineWidth = 4 + rnd() * 16; const dx = jit(70);
+        g.beginPath(); g.moveTo(fixU(base)[0] + off + dx * 1.6, base[1] + 30); g.lineTo(fixU(top)[0] + off + dx * 0.2, top[1]); g.stroke();
+      }
+      path(); g.strokeStyle = 'rgba(6,10,48,0.7)'; g.lineWidth = 9; g.stroke();
+      g.restore();
+    }
+  }
+}
+
+// ================= GEOMETRY =================
+function bodyDisp(th, p) {
+  let d = 0;
+  // oval recess with flat floor (front, θ≈0)
+  const tw = wrapPi(th);
+  if (Math.abs(tw) < 0.8 && Math.abs(p.y - OVAL.Y) < 0.1) {
+    const sc = sOfY(OVAL.Y), X = p.r * tw, Sv = p.s - sc;
+    const e = Math.hypot(X / OVAL.a, Sv / OVAL.b);
+    if (e < 1) {
+      const c = nOfY(OVAL.Y), rc = rOfY(OVAL.Y);
+      const sn = Math.sin(th), cs = Math.cos(th);
+      const P = [p.r * sn, p.y, p.r * cs], m = [p.nr * sn, p.ny, p.nr * cs], n = [0, c.ny, c.nr];
+      const C = [0, OVAL.Y - n[1] * OVAL.depth, rc - n[2] * OVAL.depth];
+      const t = -((P[0] - C[0]) * n[0] + (P[1] - C[1]) * n[1] + (P[2] - C[2]) * n[2]) / (m[0] * n[0] + m[1] * n[1] + m[2] * n[2]);
+      const w = THREE.MathUtils.smoothstep(1 - e, 0, 0.14);
+      d += Math.min(t, -0.0018) * w;
+    }
+  }
+  // sculpted agave leaves on the crown
+  if (p.y > 0.745 && p.y < 0.892 && p.r < 0.105 && p.ny > -0.5) {
+    let best = 0;
+    for (const Lf of CROWN_LEAVES) {
+      const hw = leafHW(Lf, p.y); if (hw <= 0) continue;
+      const q = Math.abs(wrapPi(th - Lf.c)) / hw; if (q >= 1) continue;
+      const t = (p.y - Lf.base) / (Lf.tip - Lf.base);
+      const fade = THREE.MathUtils.smoothstep(p.y, 0.758, Lf.base + 0.01);
+      const v = Lf.amp * Math.sqrt(1 - q * q) * fade * (1 - 0.35 * Math.max(0, t));
+      if (v > best) best = v;
+    }
+    d += best;
+  }
+  return d;
+}
+
+function buildBody(material) {
+  const NU = MOBILE ? 512 : 768, rows = S.length;
+  const pos = new Float32Array(rows * (NU + 1) * 3), uv = new Float32Array(rows * (NU + 1) * 2);
+  for (let i = 0; i < rows; i++) {
+    const p = S[i];
+    for (let j = 0; j <= NU; j++) {
+      const u = j / NU, th = TH0 + u * TAU, sn = Math.sin(th), cs = Math.cos(th);
+      const d = (p.y > 0.3 && i > iFoot) ? bodyDisp(th, p) : 0;
+      const r = p.r + p.nr * d, y = p.y + p.ny * d;
+      const k = i * (NU + 1) + j;
+      pos[k * 3] = r * sn; pos[k * 3 + 1] = y; pos[k * 3 + 2] = r * cs;
+      uv[k * 2] = u; uv[k * 2 + 1] = p.s / L;
+    }
+  }
+  const idx = new Uint32Array((rows - 1) * NU * 6); let q = 0;
+  for (let i = 0; i < rows - 1; i++) for (let j = 0; j < NU; j++) {
+    const a = i * (NU + 1) + j, b = a + NU + 1, c = b + 1, d2 = a + 1;
+    idx[q++] = a; idx[q++] = d2; idx[q++] = c; idx[q++] = a; idx[q++] = c; idx[q++] = b;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal.array;
+  for (let i = 0; i < rows; i++) { // weld seam normals
+    const a = i * (NU + 1), b = a + NU;
+    for (let c = 0; c < 3; c++) { const v = (nrm[a * 3 + c] + nrm[b * 3 + c]) / 2; nrm[a * 3 + c] = nrm[b * 3 + c] = v; }
+  }
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  return mesh;
+}
+
+// ---- back label (paper) ----
+function buildLabel() {
+  const c = document.createElement('canvas'); c.width = 2048; c.height = 1536;
+  const x = c.getContext('2d');
+  x.fillStyle = '#eceee9'; x.fillRect(0, 0, 2048, 1536);
+  x.strokeStyle = '#9aa0ad'; x.lineWidth = 4; x.strokeRect(14, 14, 2020, 1508);
+  x.fillStyle = '#2b3157'; x.textAlign = 'center';
+  x.font = 'italic 92px "Segoe Script","Brush Script MT","Lucida Handwriting",cursive'; x.fillText('Tequila', 1024, 150);
+  x.font = 'italic bold 190px "Segoe Script","Brush Script MT","Lucida Handwriting",cursive'; x.fillText('Clase Azul', 1024, 345);
+  x.font = '500 64px Georgia,serif'; x.save(); x.letterSpacing = '22px'; x.fillText('REPOSADO', 1024, 440); x.restore();
+  x.fillStyle = '#26306f'; x.fillRect(150, 478, 1748, 80);
+  x.fillStyle = '#f1f2f6'; x.font = 'bold 44px Arial,sans-serif';
+  x.fillText('REPOSADO  ·  100% PURO DE AGAVE AZUL  ·  ULTRA PREMIUM', 1024, 533);
+  x.fillStyle = '#2b3157'; x.font = '36px Arial,sans-serif';
+  const lines = ['Imported by Tequilas Premium, Inc. · San Francisco, CA', 'MADE IN MEXICO · DISTILLED AND BOTTLED AT THE SOURCE',
+                 'JALISCO · MÉXICO'];
+  lines.forEach((t, i) => x.fillText(t, 1024, 630 + i * 50));
+  x.font = 'bold 54px Arial,sans-serif'; x.fillText('www.claseazul.com', 1024, 830);
+  x.font = 'bold 48px Arial,sans-serif'; x.fillText('HECHO EN MÉXICO', 1024, 910);
+  x.textAlign = 'left'; x.font = '30px Arial,sans-serif';
+  const warn = ['GOVERNMENT WARNING: (1) ACCORDING TO THE SURGEON GENERAL, WOMEN SHOULD NOT DRINK', 'ALCOHOLIC BEVERAGES DURING PREGNANCY BECAUSE OF THE RISK OF BIRTH DEFECTS.',
+                '(2) CONSUMPTION OF ALCOHOLIC BEVERAGES IMPAIRS YOUR ABILITY TO DRIVE A CAR OR', 'OPERATE MACHINERY, AND MAY CAUSE HEALTH PROBLEMS.'];
+  warn.forEach((t, i) => x.fillText(t, 420, 1010 + i * 42));
+  // barcode
+  for (let i = 0, px = 160; px < 360; i++) { const w = 3 + ((i * 7919) % 4) * 2; if (i % 2 === 0) { x.fillRect(px, 1220, w, 190); } px += w; }
+  x.font = '28px Arial'; x.fillText('8 12 40 0 0 4 4 5', 160, 1450);
+  // kosher mark
+  x.beginPath(); x.arc(1700, 1290, 62, 0, TAU); x.lineWidth = 7; x.stroke(); x.font = 'bold 72px Arial'; x.textAlign = 'center'; x.fillText('K', 1700, 1315);
+  x.font = '26px Arial'; x.fillText('KOSHER CERTIFIED', 1700, 1400);
+  x.save(); x.translate(1960, 980); x.rotate(-Math.PI / 2); x.font = 'bold 40px Arial'; x.fillText('CONT. NET. 750 ml', 0, 0); x.restore();
+  x.save(); x.translate(90, 980); x.rotate(-Math.PI / 2); x.font = 'bold 40px Arial'; x.fillText('ALC. 40% Vol. (80 PROOF)', 0, 0); x.restore();
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16;
+
+  const th0 = 180 * D - 41 * D, th1 = 180 * D + 41 * D, Y0 = 0.078, Y1 = 0.214, NU = 120, NVl = 80;
+  const pos = [], uv = [], idx = [];
+  for (let i = 0; i <= NVl; i++) {
+    const Y = Y0 + (Y1 - Y0) * i / NVl, p = nOfY(Y), r = rOfY(Y), off = 0.0007;
+    for (let j = 0; j <= NU; j++) {
+      const th = th0 + (th1 - th0) * j / NU, rr = r + p.nr * off;
+      pos.push(rr * Math.sin(th), Y + p.ny * off, rr * Math.cos(th)); uv.push(j / NU, i / NVl);
+    }
+  }
+  for (let i = 0; i < NVl; i++) for (let j = 0; j < NU; j++) { const a = i * (NU + 1) + j, b = a + NU + 1; idx.push(a, a + 1, b + 1, a, b + 1, b); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx); geo.computeVertexNormals();
+  return new THREE.Mesh(geo, new THREE.MeshPhysicalMaterial({ map: tex, roughness: 0.38, clearcoat: 0.4, clearcoatRoughness: 0.2 }));
+}
+
+// ---- silver brooch in the oval ----
+function almond(x0, x1, w, rot, pointedBoth = true, n = 28) {
+  const up = [], pts = [];
+  for (let k = 0; k <= n; k++) {
+    const t = k / n, x = x0 + (x1 - x0) * t;
+    const y = pointedBoth ? w * Math.pow(Math.sin(Math.PI * t), 0.85) : w * Math.sin(Math.PI * Math.pow(t, 0.62)) * Math.pow(t, 0.15);
+    up.push([x, y]);
+  }
+  for (const [x, y] of up) pts.push([x, y]);
+  for (let k = up.length - 2; k > 0; k--) pts.push([up[k][0], -up[k][1]]);
+  const c = Math.cos(rot), s = Math.sin(rot);
+  return pts.map(([x, y]) => new THREE.Vector2(x * c - y * s, x * s + y * c));
+}
+function extrude(outer, holes, depth, mat, z = 0) {
+  const sh = new THREE.Shape(outer);
+  for (const h of holes) sh.holes.push(new THREE.Path(h));
+  const geo = new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: true, bevelThickness: 0.0005, bevelSize: 0.00035, bevelSegments: 3, curveSegments: 8 });
+  const m = new THREE.Mesh(geo, mat); m.position.z = z; m.castShadow = true; return m;
+}
+function buildBrooch() {
+  const silver = new THREE.MeshPhysicalMaterial({ color: 0xe4e4e6, metalness: 1, roughness: 0.13 });
+  const enamelW = new THREE.MeshPhysicalMaterial({ color: 0xf1f0ec, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.05 });
+  const enamelB = new THREE.MeshPhysicalMaterial({ color: 0x1b2a86, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.05 });
+  const grp = new THREE.Group();
+  for (let k = 0; k < 4; k++) {
+    const a = 45 * D + k * 90 * D;
+    grp.add(extrude(almond(0.0032, 0.0335, 0.0088, a), [almond(0.0052, 0.0312, 0.0068, a)], 0.0022, silver));
+    grp.add(extrude(almond(0.0052, 0.0312, 0.0068, a), [], 0.0012, enamelW));
+    const vein = new THREE.Mesh(new THREE.BoxGeometry(0.023, 0.0009, 0.0012), silver);
+    vein.position.set(Math.cos(a) * 0.018, Math.sin(a) * 0.018, 0.0018); vein.rotation.z = a; grp.add(vein);
+    const b = k * 90 * D;
+    grp.add(extrude(almond(0.0058, 0.0228, 0.0058, b, false), [almond(0.0074, 0.0214, 0.0042, b, false)], 0.0022, silver));
+    grp.add(extrude(almond(0.0074, 0.0214, 0.0042, b, false), [], 0.0014, enamelB));
+  }
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.0042, 0.0046, 0.0028, 32), silver);
+  hub.rotation.x = Math.PI / 2; hub.position.z = 0.0018; grp.add(hub);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.0024, 0.0006, 12, 32), silver); ring.position.z = 0.0034; grp.add(ring);
+  // seat it on the flat floor of the oval
+  const c = nOfY(OVAL.Y), rc = rOfY(OVAL.Y);
+  const n = new THREE.Vector3(0, c.ny, c.nr).normalize();
+  grp.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  grp.position.set(0, OVAL.Y, rc).addScaledVector(n, -OVAL.depth + 0.0002);
+  return grp;
+}
+
+// ---- stopper: black gasket + chrome dome ----
+function buildStopper() {
+  const grp = new THREE.Group();
+  const gasket = new THREE.Mesh(new THREE.CylinderGeometry(0.0935, 0.0935, 0.0072, 96),
+    new THREE.MeshPhysicalMaterial({ color: 0x0c0c0e, roughness: 0.55 }));
+  gasket.position.y = LIP_TOP + 0.0036; grp.add(gasket);
+  const yd = LIP_TOP + 0.0072, R = 0.0955, pts = [new THREE.Vector2(0, yd), new THREE.Vector2(R - 0.002, yd), new THREE.Vector2(R, yd + 0.002), new THREE.Vector2(R, yd + 0.011)];
+  for (let k = 1; k <= 48; k++) { const f = (k / 48) * Math.PI / 2; pts.push(new THREE.Vector2(Math.max(0, R * Math.cos(f)), yd + 0.011 + 0.088 * Math.sin(f))); }
+  const domeGeo = new THREE.LatheGeometry(pts, 160);
+  domeGeo.computeVertexNormals();
+  const dome = new THREE.Mesh(domeGeo,
+    new THREE.MeshPhysicalMaterial({ color: 0xf2f2f4, metalness: 1, roughness: 0.04, envMapIntensity: 1.25 }));
+  dome.castShadow = true; grp.add(dome);
+  return grp;
+}
+
+// ================= SCENE =================
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
+const PR = MOBILE ? Math.min(window.devicePixelRatio || 1, 2) : Math.min((window.devicePixelRatio || 1) * 1.5, 3);
+renderer.setPixelRatio(PR);
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+{ // studio environment: room + large soft boxes so chrome and glaze read bright like the product photos
+  const env = new THREE.Scene();
+  // gradient dome: bright ceiling, mid-grey horizon, dark floor
+  const sph = new THREE.SphereGeometry(30, 64, 32), col = [];
+  const pa = sph.attributes.position;
+  for (let i = 0; i < pa.count; i++) {
+    const t = pa.getY(i) / 30;
+    // crisp horizon: dark studio floor below, brighter wall/ceiling above
+    const v = t > 0.0 ? 0.07 + 0.16 * t : 0.025;
+    col.push(v * 0.95, v * 0.97, v * 1.05);
+  }
+  sph.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  env.add(new THREE.Mesh(sph, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+  const box = (w, h, x, y, z, c) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide }));
+    m.position.set(x, y, z); m.lookAt(0, 1.5, 0); env.add(m); };
+  box(9, 6, -6, 7, 10, new THREE.Color(7, 7, 7));          // key softbox (front-left, high)
+  box(6, 5, 9, 5, 9, new THREE.Color(3.2, 3.2, 3.3));      // front-right fill
+  box(3, 14, -14, 3, -2, new THREE.Color(3, 3, 3.1));      // left strip
+  box(3, 14, 13, 3, -5, new THREE.Color(2.6, 2.8, 3.2));   // right / rim strip
+  box(12, 12, 0, 16, 0, new THREE.Color(2.6, 2.6, 2.6));   // ceiling panel
+  box(20, 2.5, 0, 0.6, 15, new THREE.Color(1.4, 1.4, 1.45)); // low front bounce (horizon line in chrome)
+  box(20, 2.5, 0, 0.6, -15, new THREE.Color(0.9, 0.9, 1.0)); // low back bounce
+  box(30, 3, 0, -1, -16, new THREE.Color(0.25, 0.27, 0.35)); // dark backdrop band
+  scene.environment = pmrem.fromScene(env, 0.02).texture;
+}
+
+const camera = new THREE.PerspectiveCamera(28, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 1.95, 9.2);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 1.62, 0);
+if (innerWidth < innerHeight) { // portrait phones: pull back and lift the bottle above the buttons
+  const a = innerWidth / innerHeight, k = 1 + 0.45 * (1 - a);
+  controls.target.y = 1.42; camera.position.set(0, 1.8, 9.2 * k);
+}
+controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 2.4;
+controls.minDistance = 2.2; controls.maxDistance = 16; controls.maxPolarAngle = Math.PI * 0.53;
+
+const key = new THREE.DirectionalLight(0xffffff, 2.8); key.position.set(-3.5, 6, 5); key.castShadow = true;
+key.shadow.mapSize.setScalar(MOBILE ? 2048 : 4096); Object.assign(key.shadow.camera, { left: -3, right: 3, top: 4, bottom: -2, near: 1, far: 20 });
+key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02; key.shadow.radius = 6;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xbfd0ff, 1.6); rim.position.set(4, 4, -6); scene.add(rim);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334, 0.9));
+const fill = new THREE.DirectionalLight(0xffffff, 1.0); fill.position.set(4, 3, 6); scene.add(fill);
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.38 }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+{ // soft contact shadow
+  const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(128, 128, 0, 128, 128, 128); gr.addColorStop(0, 'rgba(0,0,0,.75)'); gr.addColorStop(0.45, 'rgba(0,0,0,.35)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 256, 256);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 1.7), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2; m.position.y = 0.002; scene.add(m);
+}
+
+const HEIGHT = 3.4; // decimetres ≈ real 34 cm
+const bottle = new THREE.Group(); bottle.scale.setScalar(HEIGHT); scene.add(bottle);
+let label;
+
+function build() {
+  paintTexture();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const ceramic = new THREE.MeshPhysicalMaterial({ map: tex, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.035, ior: 1.5, envMapIntensity: 1.5 });
+  bottle.add(buildBody(ceramic));
+  label = buildLabel(); bottle.add(label);
+  bottle.add(buildBrooch());
+  bottle.add(buildStopper());
+  document.getElementById('load').remove();
+}
+
+function resize() { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight, false); }
+addEventListener('resize', resize);
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+// ---- UI ----
+const $ = id => document.getElementById(id);
+$('rot').onclick = () => { controls.autoRotate = !controls.autoRotate; $('rot').textContent = controls.autoRotate ? '⏸ Пауза' : '▶ Вращать'; };
+const face = ang => { controls.autoRotate = false; $('rot').textContent = '▶ Вращать';
+  const d = camera.position.clone().sub(controls.target); const h = Math.hypot(d.x, d.z);
+  camera.position.set(controls.target.x + Math.sin(ang) * h, camera.position.y, controls.target.z + Math.cos(ang) * h); };
+$('front').onclick = () => face(0);
+$('back').onclick = () => face(Math.PI);
+$('lbl').onclick = () => { label.visible = !label.visible; $('lbl').textContent = 'Этикетка: ' + (label.visible ? 'вкл' : 'выкл'); };
+$('shot').onclick = () => {
+  const W = 3840, H = 2160;
+  renderer.setPixelRatio(1); renderer.setSize(W, H, false); camera.aspect = W / H; camera.updateProjectionMatrix();
+  renderer.render(scene, camera);
+  const out = document.createElement('canvas'); out.width = W; out.height = H; const x = out.getContext('2d');
+  const gr = x.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, H * 1.1);
+  gr.addColorStop(0, '#33405f'); gr.addColorStop(0.5, '#161c2e'); gr.addColorStop(1, '#07090f');
+  x.fillStyle = gr; x.fillRect(0, 0, W, H); x.drawImage(renderer.domElement, 0, 0);
+  renderer.setPixelRatio(PR); resize();
+  out.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'clase-azul-reposado-4k.png'; a.click(); });
+};
+
+window.__view = { camera, controls };
+window.__ready = false;
+setTimeout(() => { build(); window.__ready = true; }, 40);
+</script>
+</body>
+</html>
